@@ -70,7 +70,7 @@ professional **forensic PDF reports**.
 | 📑 **Forensic PDF Report** | 6-page auto-generated report with SHAP + MITRE + recommendations |
 | 🗄️ **3 Datasets** | NSL-KDD · UNSW-NB15 · CIC-IDS-2017 — auto format detection |
 | 🔀 **Hybrid Training** | Real NSL-KDD data + synthetic boost for underrepresented classes |
-| 🆓 **100% Free** | No paid APIs, no subscriptions, external services required |
+| 🆓 **100% Free** | No paid APIs, no subscriptions, no external services required |
 
 ---
 
@@ -358,7 +358,6 @@ Last:   Recommendations — 5 actionable remediation steps
 | flask-socketio | 5.3+ | Real-time WebSocket push |
 | eventlet | 0.33+ | Async mode for SocketIO |
 | reportlab | 4.0+ | Forensic PDF generation |
-| cryptography | 41.0+ |
 | rich | 13.0+ | Coloured terminal output |
 
 ### Frontend (Browser — no build step)
