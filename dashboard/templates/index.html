@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NIDS — AI Network Intrusion Detection</title>
+<title>Network Intrusion Detection</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -82,6 +82,16 @@
   .header-right {
     display: flex; align-items: center; gap: 20px;
   }
+  .pdf-button {
+    border: 1px solid rgba(14,165,233,.45);
+    border-radius: 5px;
+    background: rgba(14,165,233,.12);
+    color: var(--accent2);
+    padding: 5px 10px;
+    font: 700 11px var(--font-mono);
+    cursor: pointer;
+  }
+  .pdf-button:hover { background: rgba(14,165,233,.24); }
   .live-badge {
     display: flex; align-items: center; gap: 6px;
     font-size: 12px; font-weight: 600;
@@ -443,7 +453,7 @@
     <div class="logo">
       <div class="logo-icon">🛡️</div>
       <div class="logo-text">
-        <h1>NIDS — AI Network Intrusion Detection</h1>
+        <h1>Network Intrusion Detection</h1>
         <p>Powered by Random Forest + Isolation Forest + MODERN THREAT DETECTOR + XAI</p>
       </div>
     </div>
@@ -451,6 +461,7 @@
       <span class="live-badge"><span class="live-dot"></span>LIVE</span>
       <span class="uptime" id="uptime">00:00:00</span>
       <span id="conn-status">CONNECTED</span>
+      <button class="pdf-button" type="button" onclick="downloadPDF()">PDF</button>
     </div>
   </header>
 
@@ -770,6 +781,29 @@ function renderSources(sources) {
       <span class="source-cnt">${s.count}</span>
     </div>
   `).join('');
+}
+
+async function downloadPDF() {
+  const button = document.querySelector('.pdf-button');
+  button.disabled = true;
+  try {
+    const response = await fetch('/api/report');
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || 'The current session report is unavailable.');
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'nids_report.pdf';
+    link.click();
+    URL.revokeObjectURL(url);
+  } catch (error) {
+    alert(error.message);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 // ── XAI Panel ────────────────────────────────────────────────────────────────

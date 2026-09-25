@@ -35,7 +35,7 @@ class NIDSExplainer:
         if X_background is None:
             from .trainer import generate_synthetic_dataset
             df, _ = generate_synthetic_dataset(n_per_class=50)
-            X_background = self.trainer.scaler.transform(df[FEATURE_NAMES].values)
+            X_background = self.trainer.scaler.transform(df[FEATURE_NAMES])
 
         bg = X_background[:self.max_background]
         self._explainer = shap.TreeExplainer(
@@ -55,7 +55,10 @@ class NIDSExplainer:
         if not SHAP_AVAILABLE or self._explainer is None:
             return self._fallback_explain(features, top_n)
 
-        row   = np.array([[float(features.get(f, 0.0)) for f in FEATURE_NAMES]])
+        row = pd.DataFrame(
+            [{f: float(features.get(f, 0.0)) for f in FEATURE_NAMES}],
+            columns=FEATURE_NAMES,
+        )
         row_s = self.trainer.scaler.transform(row)
 
         shap_vals = self._explainer.shap_values(row_s)

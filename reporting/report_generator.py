@@ -3,6 +3,7 @@ reporting/report_generator.py — Generates a professional forensic
 PDF report from NIDS scan session data using ReportLab.
 """
 
+import io
 import os
 from datetime import datetime
 from reportlab.lib import colors
@@ -63,16 +64,25 @@ class NIDSReportGenerator:
         self.data       = session_data
         self.output_dir = output_dir
         self.ts         = datetime.now().strftime("%Y%m%d_%H%M%S")
-        os.makedirs(output_dir, exist_ok=True)
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
     def generate(self) -> str:
         path = os.path.join(self.output_dir, f"nids_report_{self.ts}.pdf")
-        s    = _styles()
+        os.makedirs(self.output_dir, exist_ok=True)
+        self._build(path)
+        return path
 
+    def generate_bytes(self):
+        buffer = io.BytesIO()
+        self._build(buffer)
+        buffer.seek(0)
+        return buffer
+
+    def _build(self, destination):
+        s = _styles()
         doc = SimpleDocTemplate(
-            path, pagesize=A4,
+            destination, pagesize=A4,
             leftMargin=MARGIN, rightMargin=MARGIN,
             topMargin=MARGIN, bottomMargin=MARGIN,
             title="NIDS Forensic Report",
@@ -91,7 +101,6 @@ class NIDSReportGenerator:
         doc.build(story,
                   onFirstPage=self._decorate,
                   onLaterPages=self._decorate)
-        return path
 
     # ─── Page Decorations ─────────────────────────────────────────────────────
 
@@ -261,16 +270,29 @@ class NIDSReportGenerator:
             return story
 
         for a in critical:
-            exp  = a.get("explanation", {})
-            feats = exp.get("top_features", [])
+            exp = a.get("explanation") or {}
+            if not isinstance(exp, dict):
+                exp = {}
+            feats = exp.get("top_features") or []
             story.append(Paragraph(
                 f'<b>Alert:</b> {a.get("label","")} from {a.get("src","")} '
                 f'— Confidence: {a.get("confidence","")}', s["Body"]))
+            if not feats:
+                summary = exp.get("summary") or "No explanation details were recorded for this alert."
+                story.append(Paragraph(summary, s["Body"]))
+                story.append(Spacer(1, 8))
+                continue
             if feats:
                 feat_rows = [["Feature","Value","Contribution","Direction"]]
                 for f in feats[:5]:
-                    feat_rows.append([f["name"], str(f["value"]),
-                                      f"{f['pct']}%", f["direction"]])
+                    if not isinstance(f, dict):
+                        continue
+                    feat_rows.append([
+                        f.get("name", "unknown"),
+                        str(f.get("value", "N/A")),
+                        f"{f.get('pct', 0)}%",
+                        f.get("direction", "unknown"),
+                    ])
                 ft = Table(feat_rows, colWidths=[45*mm,30*mm,30*mm,55*mm])
                 ft.setStyle(TableStyle([
                     ("BACKGROUND",(0,0),(-1,0),CLR_ACCENT),

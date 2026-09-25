@@ -5,7 +5,8 @@ Pushes live alerts and stats to the browser every second.
 
 import threading
 import time
-from flask import Flask, render_template, jsonify, request
+from collections import Counter
+from flask import Flask, render_template, jsonify, request, send_file
 from flask_socketio import SocketIO, emit
 
 
@@ -17,17 +18,20 @@ socketio = SocketIO(app, cors_allowed_origins="*",
 _alert_manager = None
 _detector_ref  = None
 _capture_ref   = None
+_flow_tracker_ref = None
 _trainer_ref   = None
 _start_time    = time.time()
 
 
 def init_dashboard(alert_manager, detector=None,
-                   capture=None, trainer=None):
+                   capture=None, trainer=None, flow_tracker=None):
     """Called by main.py to inject live references."""
-    global _alert_manager, _detector_ref, _capture_ref, _trainer_ref, _start_time
+    global _alert_manager, _detector_ref, _capture_ref, _flow_tracker_ref
+    global _trainer_ref, _start_time
     _alert_manager = alert_manager
     _detector_ref  = detector
     _capture_ref   = capture
+    _flow_tracker_ref = flow_tracker
     _trainer_ref   = trainer
     _start_time    = time.time()
 
@@ -43,9 +47,26 @@ def index():
 def api_stats():
     if _alert_manager is None:
         return jsonify({"error": "not initialised"})
-    stats = _alert_manager.dashboard_stats()
+    stats = _dashboard_stats()
     stats["uptime"] = _fmt_uptime(time.time() - _start_time)
     return jsonify(stats)
+
+
+@app.route("/api/report")
+def api_report():
+    if _alert_manager is None:
+        return jsonify({"error": "No active session data is available yet."}), 404
+
+    session_data = _build_session_data()
+    if not session_data["stats"].get("total_packets") and not session_data["stats"].get("total_flows"):
+        return jsonify({"error": "No active session data is available yet."}), 404
+
+    from reporting.report_generator import NIDSReportGenerator
+
+    report = NIDSReportGenerator(session_data).generate_bytes()
+    return send_file(report, as_attachment=True,
+                     download_name="nids_report.pdf",
+                     mimetype="application/pdf")
 
 
 @app.route("/api/alerts")
@@ -96,7 +117,7 @@ def on_request_state():
 def _push_full_state():
     if _alert_manager is None:
         return
-    stats  = _alert_manager.dashboard_stats()
+    stats  = _dashboard_stats()
     stats["uptime"] = _fmt_uptime(time.time() - _start_time)
     emit("stats_update",  stats)
     emit("alerts_update", _alert_manager.recent_alerts(50))
@@ -111,7 +132,7 @@ def _broadcast_loop():
         if _alert_manager is None:
             continue
         try:
-            stats = _alert_manager.dashboard_stats()
+            stats = _dashboard_stats()
             stats["uptime"] = _fmt_uptime(time.time() - _start_time)
             socketio.emit("stats_update",  stats)
             socketio.emit("alerts_update", _alert_manager.recent_alerts(50))
@@ -131,6 +152,67 @@ def _fmt_uptime(seconds: float) -> str:
     m = int((seconds % 3600) // 60)
     s = int(seconds % 60)
     return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _dashboard_stats() -> dict:
+    stats = dict(_alert_manager.dashboard_stats())
+    alerts = _alert_manager.recent_alerts(500)
+
+    capture_stats = getattr(_capture_ref, "stats", {}) or {}
+    stats["total_packets"] = int(capture_stats.get("total", 0))
+    stats["active_flows"] = (
+        _flow_tracker_ref.active_count() if _flow_tracker_ref is not None else 0
+    )
+    stats["completed_flows"] = int(stats.get("total_flows", 0))
+    stats["normal_flows"] = int(stats.get("clean", 0))
+    stats["suspicious_flows"] = max(
+        stats["completed_flows"] - stats["normal_flows"], 0
+    )
+    stats["uncertain"] = sum(
+        1 for alert in alerts if alert.get("severity") == "UNCERTAIN"
+    )
+    stats["total_alerts"] = int(stats.get("total_alerts", len(alerts)))
+    stats["capture_running"] = bool(
+        _capture_ref is not None
+        and getattr(_capture_ref, "is_running", False)
+        and getattr(_capture_ref, "error", None) is None
+    )
+
+    confidence_values = []
+    destination_counts = Counter()
+    for alert in alerts:
+        raw_confidence = str(alert.get("confidence", "")).rstrip("%")
+        try:
+            confidence_values.append(float(raw_confidence))
+        except ValueError:
+            pass
+        destination = str(alert.get("dst", ""))
+        if destination:
+            destination_counts[destination.rsplit(":", 1)[0]] += 1
+    stats["confidence_avg"] = round(
+        sum(confidence_values) / len(confidence_values), 1
+    ) if confidence_values else 0.0
+    stats["top_destinations"] = [
+        {"ip": ip, "count": count}
+        for ip, count in destination_counts.most_common(5)
+    ]
+    return stats
+
+
+def _build_session_data() -> dict:
+    stats = _dashboard_stats()
+    capture_mode = getattr(_capture_ref, "mode", "unknown")
+    return {
+        "meta": {
+            "session_start": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_start_time)),
+            "session_end": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "hostname": "dashboard session",
+            "mode": str(capture_mode).capitalize(),
+        },
+        "stats": stats,
+        "alerts": _alert_manager.all_alerts_for_report(),
+        "top_sources": stats.get("top_sources", []),
+    }
 
 
 def run(host: str = "0.0.0.0", port: int = 5000, debug: bool = False):

@@ -44,6 +44,7 @@ CLASS_COLOUR = {
 }
 
 MAX_ALERTS = 500      # rolling window kept in memory
+ALERT_SEVERITIES = {"CLEAN", "CRITICAL", "HIGH", "MEDIUM", "LOW", "UNCERTAIN"}
 
 
 class Alert:
@@ -93,6 +94,7 @@ class Alert:
 class AlertManager:
     def __init__(self):
         self._alerts: deque[Alert]      = deque(maxlen=MAX_ALERTS)
+        self._alert_keys: set[tuple]    = set()
         self._stats                     = defaultdict(int)
         self._attack_counts             = defaultdict(int)
         self._src_ip_counts             = defaultdict(int)
@@ -105,12 +107,28 @@ class AlertManager:
         """Create and store an alert. Returns None if traffic is clean."""
         self._stats["total_flows"] += 1
 
-        if detection["severity"] == "CLEAN":
+        severity = detection.get("severity", "UNCERTAIN").upper()
+        if severity not in ALERT_SEVERITIES:
+            severity = "UNCERTAIN"
+
+        if severity == "CLEAN":
             self._stats["clean"] += 1
             return None
 
+        detection = {**detection, "severity": severity}
+        event_key = (
+            flow.src_ip, flow.src_port, flow.dst_ip, flow.dst_port,
+            flow.protocol, detection.get("label", "").lower(),
+        )
+        if event_key in self._alert_keys:
+            return None
+
         alert = Alert(flow, detection, explanation)
+        alert._event_key = event_key
+        if len(self._alerts) == MAX_ALERTS:
+            self._alert_keys.discard(getattr(self._alerts[-1], "_event_key", None))
         self._alerts.appendleft(alert)
+        self._alert_keys.add(event_key)
         self._stats[alert.severity]   += 1
         self._attack_counts[alert.label] += 1
         self._src_ip_counts[alert.src_ip] += 1
@@ -147,6 +165,7 @@ class AlertManager:
 
     def clear(self):
         self._alerts.clear()
+        self._alert_keys.clear()
         self._stats.clear()
         self._attack_counts.clear()
         self._src_ip_counts.clear()

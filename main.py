@@ -64,14 +64,16 @@ def parse_args():
     ru = sub.add_parser("run", help="Start NIDS detection + dashboard")
     ru.add_argument("--mode", choices=["simulate","live"],
                     default="simulate", help="Traffic source")
-    ru.add_argument("--iface", default="eth0",
-                    help="Network interface for live mode")
+    ru.add_argument("--iface", default="auto",
+                    help="Scapy interface name/identifier (default: auto Wi-Fi)")
     ru.add_argument("--port", type=int, default=5000,
                     help="Dashboard port (default 5000)")
     ru.add_argument("--no-dashboard", action="store_true",
                     help="CLI-only mode (no web dashboard)")
     ru.add_argument("--ssl", action="store_true",
                     help="Enable HTTPS (uses cert.pem + key.pem in project root)")
+    ru.add_argument("--debug", action="store_true",
+                    help="Log detailed per-flow feature data")
 
     # report
     rp = sub.add_parser("report", help="Generate PDF from saved session")
@@ -166,7 +168,7 @@ def cmd_run(args):
     from ml.trainer       import NIDSTrainer
     from ml.detector      import NIDSDetector
     from ml.explainer     import NIDSExplainer
-    from core.packet_capture import PacketCapture
+    from core.packet_capture import PacketCapture, PacketCaptureError
     from core.flow_tracker   import FlowTracker
     from alerts.alert_manager import AlertManager
     import dashboard.app as dash_app
@@ -207,6 +209,7 @@ def cmd_run(args):
 
     alert_mgr  = AlertManager()
     flow_track = FlowTracker()
+    debug_enabled = getattr(args, "debug", False)
 
     # ── Packet callback ──────────────────────────────────────────────────────
     def on_packet(pkt_info: dict):
@@ -214,6 +217,11 @@ def cmd_run(args):
         flow_track.process_packet(pkt_info)
 
         for flow, features in flow_track.collect_expired():
+            if debug_enabled:
+                debug = flow_track.get_last_feature_debug()
+                if debug:
+                    print(f"[debug] flow={flow.src_ip}:{flow.src_port}->{flow.dst_ip}:{flow.dst_port} features={debug['stats']} | {features}")
+
             detection   = detector.predict(features)
             explanation = explainer.explain(features)
             alert       = alert_mgr.add(flow, detection, explanation)
@@ -231,9 +239,23 @@ def cmd_run(args):
 
     capture = PacketCapture(mode=mode, interface=iface, callback=on_packet)
 
+    try:
+        capture.start()
+    except PacketCaptureError as exc:
+        console.print(f"[bold red]Live capture could not start:[/bold red] {exc}")
+        return
+
+    if mode == "live":
+        console.print(
+            f"[cyan]Scapy interface:[/cyan] {capture.interface_name} "
+            f"({capture.interface})"
+        )
+
     # ── Dashboard ─────────────────────────────────────────────────────────────
     if not no_dash:
-        dash_app.init_dashboard(alert_mgr, detector, capture, trainer)
+        dash_app.init_dashboard(
+            alert_mgr, detector, capture, trainer, flow_tracker=flow_track
+        )
         use_ssl = getattr(args, "ssl", False)
         dash_thread = threading.Thread(
             target=dash_app.run,
@@ -253,11 +275,10 @@ def cmd_run(args):
     )
     console.print("[dim]Press Ctrl+C to stop and generate report.[/dim]\n")
 
-    capture.start()
     start_time = time.time()
 
     try:
-        while True:
+        while capture.is_running:
             time.sleep(5)
             s = alert_mgr.dashboard_stats()
             console.print(
@@ -270,7 +291,12 @@ def cmd_run(args):
             )
     except KeyboardInterrupt:
         console.print("\n[yellow]Stopping capture…[/yellow]")
+    finally:
         capture.stop()
+
+    if capture.error:
+        console.print(f"[bold red]Capture stopped:[/bold red] {capture.error}")
+        return
 
     # ── Auto-generate report ──────────────────────────────────────────────────
     console.print("[cyan]Generating PDF report…[/cyan]")
@@ -303,9 +329,8 @@ def _generate_report(alert_mgr, trainer, mode, start_time):
         "top_sources": stats.get("top_sources", []),
     }
 
-    reporter = NIDSReportGenerator(session_data, output_dir="./reports")
-    path     = reporter.generate()
-    console.print(f"[bold green]✅  Report saved:[/bold green] [cyan]{path}[/cyan]")
+    report = NIDSReportGenerator(session_data).generate_bytes()
+    console.print(f"[bold green]✅  Report generated in memory ({len(report.getvalue())} bytes).[/bold green]")
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

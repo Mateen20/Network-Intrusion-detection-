@@ -9,6 +9,74 @@ import threading
 import time
 from typing import Callable
 
+
+class PacketCaptureError(RuntimeError):
+    """Raised when live capture cannot be configured or started."""
+
+
+def discover_interfaces() -> list[dict]:
+    """Return Scapy's Windows/Npcap interfaces with friendly metadata."""
+    try:
+        from scapy.all import conf, get_if_list
+    except ImportError as exc:
+        raise PacketCaptureError(
+            "Scapy is not installed. Install the project requirements before "
+            "using --mode live."
+        ) from exc
+
+    interfaces = []
+    for identifier in get_if_list():
+        details = conf.ifaces.get(identifier)
+        interfaces.append({
+            "identifier": identifier,
+            "name": getattr(details, "name", "") or identifier,
+            "description": getattr(details, "description", "") or "",
+            "guid": getattr(details, "guid", "") or "",
+            "ip": getattr(details, "ip", "") or "",
+        })
+    return interfaces
+
+
+def select_interface(requested: str, interfaces: list[dict]) -> dict:
+    """Resolve an explicit Scapy identifier/name or automatically find Wi-Fi."""
+    value = (requested or "auto").strip()
+    lowered = value.casefold()
+
+    if lowered in {"auto", "wifi", "wi-fi", "wireless"}:
+        candidates = [
+            iface for iface in interfaces
+            if "wi-fi" in iface["name"].casefold()
+            or "wifi" in iface["name"].casefold()
+            or "wireless" in iface["description"].casefold()
+            or "wi-fi" in iface["description"].casefold()
+        ]
+        usable = [
+            iface for iface in candidates
+            if iface["ip"] and not iface["ip"].startswith(("127.", "169.254."))
+        ]
+        if usable:
+            return usable[0]
+        if candidates:
+            return candidates[0]
+
+    for iface in interfaces:
+        aliases = (
+            iface["identifier"], iface["name"],
+            iface["description"], iface["guid"],
+        )
+        if any(value.casefold() == alias.casefold() for alias in aliases if alias):
+            return iface
+
+    available = "\n".join(
+        f"  {iface['name']} -> {iface['identifier']}"
+        + (f" ({iface['description']})" if iface["description"] else "")
+        for iface in interfaces
+    ) or "  No Scapy/Npcap interfaces were discovered."
+    raise PacketCaptureError(
+        f"Invalid live interface {requested!r}. Use a Scapy interface name or "
+        f"identifier, not a Windows adapter index. Available interfaces:\n{available}"
+    )
+
 # ─── Simulation Config ────────────────────────────────────────────────────────
 NORMAL_HOSTS = [f"192.168.1.{i}" for i in range(2, 30)]
 ATTACK_HOSTS = [f"10.0.{random.randint(0,255)}.{random.randint(1,254)}"
@@ -53,18 +121,22 @@ class PacketCapture:
     """Unified interface for live capture and traffic simulation."""
 
     def __init__(self, mode: str = "simulate",
-                 interface: str = "eth0",
+                 interface: str = "auto",
                  callback: Callable | None = None):
         self.mode       = mode          # "live" | "simulate"
         self.interface  = interface
         self.callback   = callback      # fn(pkt_info: dict)
         self._running   = False
         self._thread    = None
+        self._error     = None
+        self.interface_name = interface
         self.stats      = {"total": 0, "attacks_injected": 0}
 
     # ─── Public API ───────────────────────────────────────────────────────────
 
     def start(self):
+        if self.mode == "live":
+            self._configure_live_interface()
         self._running = True
         if self.mode == "live":
             self._thread = threading.Thread(
@@ -78,18 +150,36 @@ class PacketCapture:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
+            self._thread = None
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def error(self) -> PacketCaptureError | None:
+        return self._error
 
     def set_callback(self, fn: Callable):
         self.callback = fn
 
     # ─── Live Capture (Scapy) ─────────────────────────────────────────────────
 
+    def _configure_live_interface(self):
+        interfaces = discover_interfaces()
+        selected = select_interface(self.interface, interfaces)
+        self.interface = selected["identifier"]
+        self.interface_name = selected["name"]
+
     def _live_capture(self):
         try:
             from scapy.all import sniff, IP, TCP, UDP, ICMP
         except ImportError:
-            print("[!] Scapy not installed — falling back to simulation.")
-            self._simulate()
+            self._error = PacketCaptureError(
+                "Scapy is not installed. Install the project requirements before "
+                "using --mode live."
+            )
+            self._running = False
             return
 
         def _process(pkt):
@@ -102,14 +192,22 @@ class PacketCapture:
                     self.callback(info)
 
         try:
-            sniff(iface=self.interface, prn=_process,
-                  store=False, stop_filter=lambda _: not self._running)
-        except PermissionError:
-            print("[!] Root/admin required for live capture — using simulation.")
-            self._simulate()
+            while self._running:
+                sniff(iface=self.interface, prn=_process,
+                      store=False, timeout=1)
+        except PermissionError as exc:
+            self._error = PacketCaptureError(
+                "Npcap denied live capture. Run the terminal with the privileges "
+                "required by your Npcap installation."
+            )
+            print(f"[!] {self._error}")
+            self._running = False
         except Exception as e:
-            print(f"[!] Capture error: {e} — using simulation.")
-            self._simulate()
+            self._error = PacketCaptureError(
+                f"Npcap/Scapy live capture failed on {self.interface!r}: {e}"
+            )
+            print(f"[!] {self._error}")
+            self._running = False
 
     @staticmethod
     def _parse_scapy_pkt(pkt) -> dict | None:

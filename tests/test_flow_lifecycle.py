@@ -1,0 +1,72 @@
+from core.flow_tracker import FLOW_TIMEOUT, FlowTracker
+from ml.trainer import FEATURE_NAMES
+
+
+def packet(size=120, flags=None):
+    return {
+        "src_ip": "192.168.1.10",
+        "dst_ip": "192.168.1.1",
+        "src_port": 50000,
+        "dst_port": 443,
+        "protocol": 0,
+        "size": size,
+        "flags": flags or {"SYN": False, "ACK": True, "FIN": False, "RST": False, "URG": False},
+    }
+
+
+def age_flow(tracker):
+    flow = next(iter(tracker._flows.values()))
+    flow.last_seen -= FLOW_TIMEOUT + 1
+
+
+def test_flow_accumulates_multiple_packets_before_collection():
+    tracker = FlowTracker()
+    tracker.process_packet(packet(120, {"SYN": True, "ACK": True, "FIN": False, "RST": False, "URG": False}))
+    tracker.process_packet(packet(80))
+
+    assert tracker.active_count() == 1
+    flow = next(iter(tracker._flows.values()))
+    assert flow.pkt_count == 2
+    assert flow.src_bytes == 200
+
+
+def test_flow_remains_active_before_timeout():
+    tracker = FlowTracker()
+    tracker.process_packet(packet())
+
+    assert tracker.collect_expired() == []
+    assert tracker.active_count() == 1
+
+
+def test_flow_expires_after_inactivity():
+    tracker = FlowTracker()
+    tracker.process_packet(packet())
+    age_flow(tracker)
+
+    expired = tracker.collect_expired()
+
+    assert len(expired) == 1
+    assert tracker.active_count() == 0
+
+
+def test_expired_flow_is_collected_once():
+    tracker = FlowTracker()
+    tracker.process_packet(packet())
+    age_flow(tracker)
+
+    assert len(tracker.collect_expired()) == 1
+    assert tracker.collect_expired() == []
+
+
+def test_collected_flow_has_canonical_features():
+    tracker = FlowTracker()
+    tracker.process_packet(packet(120, {"SYN": True, "ACK": True, "FIN": False, "RST": False, "URG": False}))
+    tracker.process_packet(packet(80))
+    age_flow(tracker)
+
+    _, features = tracker.collect_expired()[0]
+
+    assert list(features) == FEATURE_NAMES
+    assert len(features) == 24
+    assert features["src_bytes"] == 200.0
+    assert features["port_number"] == 443.0
