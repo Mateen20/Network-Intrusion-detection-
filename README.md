@@ -1,4 +1,4 @@
-# 🛡️ NIDS — AI-Powered Network Intrusion Detection System
+# Network Intrusion Detection System
 
 <div align="center">
 
